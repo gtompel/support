@@ -1,0 +1,60 @@
+# Бинарные файлы для программ и пакетов
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+support
+
+# Выходные файлы сборки
+/bin/
+/dist/
+/build/
+
+# Файлы базы данных и индексов
+*.db
+*.db-journal
+*.bleve
+faq.db
+faq.bleve
+
+# Временные файлы
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Файлы IDE и редакторов
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Файлы зависимостей
+/vendor/
+/go.sum
+
+# Логи и отладочные файлы
+*.log
+debug
+debug.test
+
+# Файлы профилирования
+*.prof
+*.trace
+*.test
+*.cover
+coverage.txt
+
+# Локальные конфигурационные файлы
+.env
+.env.local
+config.local.yaml
+
+# Другие специфичные для проекта файлы
+*.bak
+*.backup
+*.orig
