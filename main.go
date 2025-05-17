@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -34,6 +38,21 @@ type ResultCard struct {
 	answer   string
 	onCopy   func(string)
 	onSave   func(string, string)
+}
+
+// OllamaRequest представляет запрос к Ollama API
+type OllamaRequest struct {
+	Model   string                 `json:"model"`
+	Prompt  string                 `json:"prompt"`
+	Stream  bool                   `json:"stream"`
+	Context string                 `json:"context,omitempty"`
+	Options map[string]interface{} `json:"options,omitempty"`
+}
+
+// OllamaResponse представляет ответ от Ollama API
+type OllamaResponse struct {
+	Response string `json:"response"`
+	Done     bool   `json:"done"`
 }
 
 func newResultCard(question, answer string, onCopy func(string), onSave func(string, string)) *ResultCard {
@@ -75,6 +94,42 @@ func (c *ResultCard) CreateRenderer() fyne.WidgetRenderer {
 	card.Resize(fyne.NewSize(500, 0))
 
 	return widget.NewSimpleRenderer(card)
+}
+
+// generateAnswer генерирует ответ с помощью Ollama
+func generateAnswer(question string, context string) (string, error) {
+	req := OllamaRequest{
+		Model:  "mistral", // Используем модель Mistral
+		Prompt: fmt.Sprintf("Вопрос: %s\nКонтекст: %s\nОтвет:", question, context),
+		Stream: false,
+		Options: map[string]interface{}{
+			"temperature": 0.7,
+			"top_p":       0.9,
+		},
+	}
+
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := http.Post("http://localhost:11434/api/generate", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("ошибка подключения к Ollama: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var ollamaResp OllamaResponse
+	if err := json.Unmarshal(body, &ollamaResp); err != nil {
+		return "", err
+	}
+
+	return ollamaResp.Response, nil
 }
 
 func main() {
@@ -140,7 +195,23 @@ func main() {
 	progress := widget.NewProgressBarInfinite()
 	progress.Hide()
 
-	// 5. Функция поиска ответа с использованием Bleve
+	// Статус подключения к Ollama
+	ollamaStatus := widget.NewLabel("Статус Ollama: Проверка...")
+	go func() {
+		resp, err := http.Get("http://localhost:11434/api/tags")
+		if err != nil {
+			ollamaStatus.SetText("Статус Ollama: Отключено")
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			ollamaStatus.SetText("Статус Ollama: Подключено")
+		} else {
+			ollamaStatus.SetText("Статус Ollama: Ошибка")
+		}
+	}()
+
+	// 5. Функция поиска ответа с использованием Bleve и Ollama
 	findAnswer := func(question string) {
 		if strings.TrimSpace(question) == "" {
 			dialog.ShowInformation("Предупреждение", "Пожалуйста, введите вопрос", w)
@@ -159,9 +230,11 @@ func main() {
 		historyList.Refresh()
 
 		// Показываем индикатор загрузки
-		progress.Show()
-		resultsContainer.Objects = nil
-		resultsContainer.Refresh()
+		fyne.Do(func() {
+			progress.Show()
+			resultsContainer.Objects = nil
+			resultsContainer.Refresh()
+		})
 
 		// Запускаем поиск в отдельной горутине
 		go func() {
@@ -170,125 +243,108 @@ func main() {
 			searchRequest.Size = 5 // Показываем топ-5 результатов
 			searchResult, err := index.Search(searchRequest)
 
-			// Скрываем индикатор загрузки
-			progress.Hide()
-
 			if err != nil {
-				dialog.ShowError(err, w)
+				fyne.Do(func() {
+					progress.Hide()
+					dialog.ShowError(err, w)
+				})
 				return
 			}
 
 			if len(searchResult.Hits) > 0 {
-				var results []struct {
-					Question string
-					Answer   string
-				}
-
+				// Собираем контекст из найденных ответов
+				var contextBuilder strings.Builder
 				for _, hit := range searchResult.Hits {
+					// Получаем ID документа и ищем соответствующий FAQEntry
+					id := hit.ID
 					for _, entry := range faqEntries {
-						if fmt.Sprintf("%d", entry.ID) == hit.ID {
-							results = append(results, struct {
-								Question string
-								Answer   string
-							}{
-								Question: entry.Question,
-								Answer:   entry.Answer,
-							})
+						if fmt.Sprintf("%d", entry.ID) == id {
+							contextBuilder.WriteString(fmt.Sprintf("Вопрос: %s\nОтвет: %s\n\n", entry.Question, entry.Answer))
 							break
 						}
 					}
 				}
 
-				// Очищаем контейнер результатов
-				resultsContainer.Objects = nil
-
-				// Добавляем карточки с результатами
-				for _, result := range results {
-					card := newResultCard(result.Question, result.Answer,
-						func(text string) {
-							w.Clipboard().SetContent(text)
-							dialog.ShowInformation("Успех", "Ответ скопирован в буфер обмена", w)
-						},
-						func(question, answer string) {
-							_, err := db.Exec("INSERT INTO favorites (question, answer) VALUES (?, ?)",
-								question, answer)
-							if err != nil {
-								dialog.ShowError(err, w)
-								return
-							}
-							dialog.ShowInformation("Успех", "Ответ добавлен в избранное", w)
-						})
-					resultsContainer.Add(card)
+				// Генерируем ответ с помощью Ollama
+				answer, err := generateAnswer(question, contextBuilder.String())
+				if err != nil {
+					fyne.Do(func() {
+						progress.Hide()
+						dialog.ShowError(err, w)
+					})
+					return
 				}
-			} else {
-				dialog.ShowInformation("Результат", "По вашему запросу ничего не найдено", w)
-			}
 
-			resultsContainer.Refresh()
+				// Создаем карточку с результатом
+				card := newResultCard(question, answer,
+					func(text string) {
+						w.Clipboard().SetContent(text)
+						dialog.ShowInformation("Успех", "Ответ скопирован в буфер обмена", w)
+					},
+					func(question, answer string) {
+						_, err := db.Exec("INSERT INTO favorites (question, answer) VALUES (?, ?)",
+							question, answer)
+						if err != nil {
+							dialog.ShowError(err, w)
+							return
+						}
+						dialog.ShowInformation("Успех", "Ответ добавлен в избранное", w)
+					},
+				)
+
+				fyne.Do(func() {
+					resultsContainer.Add(card)
+					resultsContainer.Refresh()
+					progress.Hide()
+				})
+			} else {
+				fyne.Do(func() {
+					progress.Hide()
+					dialog.ShowInformation("Результат", "По вашему запросу ничего не найдено", w)
+				})
+			}
 		}()
 	}
 
-	// 6. Кнопка "Найти"
-	button := widget.NewButtonWithIcon("Найти", theme.SearchIcon(), func() {
-		findAnswer(input.Text)
-	})
-	button.Importance = widget.HighImportance
-
-	// Добавляем обработку Enter в поле ввода
-	input.OnSubmitted = func(s string) {
-		findAnswer(s)
-	}
-
-	// 7. Компоновка GUI
-	searchBox := container.NewVBox(
-		searchLabel,
-		input,
-		container.NewHBox(layout.NewSpacer(), button),
-	)
-
-	resultsTitle := canvas.NewText("Результаты поиска", theme.ForegroundColor())
-	resultsTitle.TextSize = 18
-	resultsTitle.Alignment = fyne.TextAlignCenter
-
-	// Создаем скроллируемый контейнер для результатов
-	scrollContainer := container.NewScroll(resultsContainer)
-	scrollContainer.SetMinSize(fyne.NewSize(500, 300))
-
-	// Создаем вкладки
+	// 6. Создание вкладок
 	tabs := container.NewAppTabs(
 		container.NewTabItem("Поиск", container.NewVBox(
 			title,
-			layout.NewSpacer(),
-			searchBox,
-			layout.NewSpacer(),
+			searchLabel,
+			input,
 			progress,
-			resultsTitle,
-			scrollContainer,
+			ollamaStatus,
+			resultsContainer,
 		)),
-		container.NewTabItem("История", container.NewVBox(
-			widget.NewLabelWithStyle("История поиска", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-			container.NewScroll(historyList),
-		)),
-		container.NewTabItem("Избранное", container.NewVBox(
-			widget.NewLabelWithStyle("Избранные ответы", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-			container.NewScroll(loadFavorites(db)),
-		)),
+		container.NewTabItem("История", historyList),
+		container.NewTabItem("Избранное", loadFavorites(db)),
 	)
 
-	// Добавляем отступы
-	paddedContent := container.NewPadded(tabs)
+	// 7. Добавление обработчиков событий
+	input.OnSubmitted = func(question string) {
+		findAnswer(question)
+	}
 
-	w.SetContent(paddedContent)
-	w.Resize(fyne.NewSize(800, 600))
-	w.CenterOnScreen()
+	searchButton := widget.NewButtonWithIcon("Найти", theme.SearchIcon(), func() {
+		findAnswer(input.Text)
+	})
 
-	// Добавляем поддержку горячих клавиш
+	// Добавляем горячие клавиши
 	if _, ok := a.(desktop.App); ok {
-		w.Canvas().AddShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyReturn, Modifier: desktop.ControlModifier}, func(shortcut fyne.Shortcut) {
-			findAnswer(input.Text)
+		ctrlF := &desktop.CustomShortcut{KeyName: fyne.KeyF, Modifier: desktop.ControlModifier}
+		w.Canvas().AddShortcut(ctrlF, func(shortcut fyne.Shortcut) {
+			input.FocusGained()
 		})
 	}
 
+	// 8. Установка содержимого окна
+	w.SetContent(container.NewVBox(
+		tabs,
+		container.NewHBox(layout.NewSpacer(), searchButton),
+	))
+
+	// 9. Запуск приложения
+	w.Resize(fyne.NewSize(800, 600))
 	w.ShowAndRun()
 }
 
