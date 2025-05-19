@@ -12,6 +12,7 @@ support
 /bin/
 /dist/
 /build/
+main.bin
 
 # Файлы базы данных и индексов
 *.db
