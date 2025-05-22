@@ -173,7 +173,7 @@ func generateAnswer(question string, context string) (string, error) {
 		return "", err
 	}
 
-	resp, err := http.Post("http://localhost:11434/api/generate", "application/json", bytes.NewBuffer(jsonData))
+	resp, err := http.Post("http://172.16.10.228:11434/api/generate", "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", fmt.Errorf("ошибка подключения к Ollama: %v", err)
 	}
@@ -297,7 +297,7 @@ func main() {
 	}
 
 	go func() {
-		resp, err := http.Get("http://localhost:11434/api/tags")
+		resp, err := http.Get("http://172.16.10.228:11434/api/tags")
 		if err != nil {
 			updateOllamaStatus("Отключено", color.NRGBA{R: 255, G: 0, B: 0, A: 255})
 			return
@@ -479,14 +479,14 @@ func main() {
 }
 
 // loadFavorites загружает избранные ответы из базы данных
-func loadFavorites(db *sql.DB, w fyne.Window) *fyne.Container {
+func loadFavorites(db *sql.DB, w fyne.Window) fyne.CanvasObject {
 	rows, err := db.Query("SELECT question, answer FROM favorites ORDER BY created_at DESC")
 	if err != nil {
 		return container.NewVBox(widget.NewLabel("Ошибка загрузки избранного"))
 	}
 	defer rows.Close()
 
-	container := container.NewVBox()
+	content := container.NewVBox()
 	for rows.Next() {
 		var question, answer string
 		if err := rows.Scan(&question, &answer); err != nil {
@@ -512,9 +512,11 @@ func loadFavorites(db *sql.DB, w fyne.Window) *fyne.Container {
 				mainTabs.Refresh()
 				dialog.ShowInformation("Успех", "Ответ удален из избранного", w)
 			})
-		container.Add(card)
+		content.Add(card)
 	}
-	return container
+	scroll := container.NewScroll(content)
+	scroll.Resize(fyne.NewSize(800, 800))
+	return scroll
 }
 
 // loadFAQEntries загружает все вопросы и ответы из базы данных
