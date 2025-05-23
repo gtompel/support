@@ -7,12 +7,13 @@
 *.test
 *.out
 support
+*.sh
 
 # Выходные файлы сборки
 /bin/
 /dist/
 /build/
-main.bin
+/release/
 
 # Файлы базы данных и индексов
 *.db
